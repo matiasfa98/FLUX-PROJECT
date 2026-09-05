@@ -1,20 +1,20 @@
 const jwt = require("jsonwebtoken");
 
-const chatSocket = require("./chatSocket");
 const roomSocket = require("./roomSocket");
+const chatSocket = require("./chatSocket");
 const editorSocket = require("./editorSocket");
 
-const setupSocket = (io) => {
-
-  // ======================================
-  // SOCKET AUTHENTICATION
-  // ======================================
+module.exports = (io) => {
+  /*
+  ========================================
+  SOCKET AUTHENTICATION
+  ========================================
+  */
 
   io.use((socket, next) => {
-
     try {
-
-      const token = socket.handshake.auth.token;
+      const token =
+        socket.handshake.auth?.token;
 
       if (!token) {
         return next(
@@ -27,14 +27,16 @@ const setupSocket = (io) => {
         process.env.JWT_SECRET
       );
 
-      socket.user = decoded;
+      socket.user = {
+        id: decoded.id,
+        username: decoded.username,
+        email: decoded.email,
+      };
 
       next();
-
     } catch (error) {
-
       console.error(
-        "Socket authentication error:",
+        "SOCKET AUTH ERROR:",
         error.message
       );
 
@@ -44,60 +46,78 @@ const setupSocket = (io) => {
     }
   });
 
-
-  // ======================================
-  // CONNECTION
-  // ======================================
+  /*
+  ========================================
+  CONNECTION
+  ========================================
+  */
 
   io.on("connection", (socket) => {
-
     console.log(
-      `Socket connected: ${socket.user.username}`
+      `🔌 Socket connected: ${socket.user.username} (${socket.user.id})`
     );
 
+    /*
+    ========================================
+    CURRENT ROOM
+    ========================================
+    */
 
-    // ======================================
-    // ROOM EVENTS
-    // ======================================
+    socket.currentRoom = null;
 
-    console.log("REGISTERING ROOM SOCKET");
+    /*
+    ========================================
+    ROOM SOCKET EVENTS
+    ========================================
+    */
 
     roomSocket(io, socket);
-    socket.on("room:join", (roomId) => {
-  console.log("🔥 DIRECT ROOM JOIN RECEIVED:", roomId);
-});
-     console.log("ROOM SOCKET REGISTERED");
 
-
-    // ======================================
-    // CHAT EVENTS
-    // ======================================
+    /*
+    ========================================
+    CHAT SOCKET EVENTS
+    ========================================
+    */
 
     chatSocket(io, socket);
 
-
-    // ======================================
-    // EDITOR EVENTS
-    // ======================================
+    /*
+    ========================================
+    EDITOR SOCKET EVENTS
+    ========================================
+    */
 
     editorSocket(io, socket);
 
+    /*
+    ========================================
+    GENERAL SOCKET EVENTS
+    ========================================
+    */
 
-    // ======================================
-    // DISCONNECT
-    // ======================================
-
-    socket.on("disconnect", () => {
-
-      console.log(
-        `Socket disconnected: ${socket.user.username}`
-      );
-
+    socket.on("ping", () => {
+      socket.emit("pong", {
+        message: "Flux socket is alive",
+        time: new Date(),
+      });
     });
 
+    /*
+    ========================================
+    DISCONNECT
+    ========================================
+    */
+
+    socket.on("disconnect", (reason) => {
+      console.log(
+        `🔌 Socket disconnected: ${socket.user.username}`
+      );
+
+      console.log(
+        `Reason: ${reason}`
+      );
+
+      socket.currentRoom = null;
+    });
   });
-
 };
-
-
-module.exports = setupSocket;

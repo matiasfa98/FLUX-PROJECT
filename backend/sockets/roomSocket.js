@@ -1,142 +1,282 @@
 const Room = require("../models/Room");
 
-const roomSocket = (io, socket) => {
-  console.log(`Room socket registered for ${socket.user.username}`);
-
+module.exports = (io, socket) => {
   /*
-  ==========================================
-  JOIN ROOM
-  ==========================================
+  |--------------------------------------------------------------------------
+  | Helpers
+  |--------------------------------------------------------------------------
   */
 
-  socket.on("room:join", async ({ roomId }) => {
+  const getUserId = () => socket.user.id.toString();
+
+  const isMember = (room, userId) => {
+    return room.members.some(
+      (member) =>
+        member.user.toString() === userId.toString()
+    );
+  };
+
+  const isOwner = (room, userId) => {
+    return (
+      room.owner.toString() === userId.toString()
+    );
+  };
+
+  const isOwnerOrAdmin = (room, userId) => {
+    if (isOwner(room, userId)) {
+      return true;
+    }
+
+    const member = room.members.find(
+      (member) =>
+        member.user.toString() === userId.toString()
+    );
+
+    return member?.role === "admin";
+  };
+
+  const isDriver = (room, userId) => {
+    return (
+      room.driver &&
+      room.driver.toString() === userId.toString()
+    );
+  };
+
+  const emitError = (event, message) => {
+    socket.emit(event, {
+      message,
+    });
+  };
+
+  const populateRoom = async (room) => {
+    await room.populate([
+      {
+        path: "owner",
+        select: "username email avatar status",
+      },
+      {
+        path: "members.user",
+        select: "username email avatar status",
+      },
+      {
+        path: "driver",
+        select: "username email avatar status",
+      },
+    ]);
+
+    return room;
+  };
+
+  /*
+  |--------------------------------------------------------------------------
+  | JOIN REALTIME ROOM
+  |--------------------------------------------------------------------------
+  |
+  | IMPORTANT:
+  | This does NOT make someone a database member.
+  |
+  | The REST endpoint:
+  |
+  | POST /api/rooms/:id/join
+  |
+  | must be used first.
+  |
+  |--------------------------------------------------------------------------
+  */
+
+  socket.on("room:join", async (data) => {
     try {
+      const roomId =
+        typeof data === "string"
+          ? data
+          : data?.roomId;
+
       if (!roomId) {
-        return socket.emit("room:error", {
-          message: "Room ID is required",
-        });
+        return emitError(
+          "room:error",
+          "Room ID is required"
+        );
       }
 
       const room = await Room.findById(roomId);
 
       if (!room) {
-        return socket.emit("room:error", {
-          message: "Room not found",
-        });
+        return emitError(
+          "room:error",
+          "Room not found"
+        );
       }
 
-      // Check membership
-      const isMember = room.members.some(
-        (member) =>
-          member.user.toString() === socket.user.id
-      );
-
-      if (!isMember) {
-        return socket.emit("room:error", {
-          message: "You are not a member of this room",
-        });
-      }
-
-      // Leave previous room if the socket was already inside one
-      if (socket.currentRoom) {
-        socket.leave(socket.currentRoom);
-      }
-
-      // Join new room
-      socket.join(roomId);
-
-      socket.currentRoom = roomId;
-
-      console.log(
-        `${socket.user.username} joined room ${roomId}`
-      );
+      const userId = getUserId();
 
       /*
-      IMPORTANT:
+       * User must already be an approved member.
+       */
 
-      We DO NOT automatically assign a driver here.
+      if (!isMember(room, userId)) {
+        return emitError(
+          "room:error",
+          "You are not a member of this room"
+        );
+      }
 
-      If the room has no driver:
-          driver = null
+      /*
+       * If already inside this room, don't join twice.
+       */
 
-      The user must explicitly receive control.
-      */
+      if (socket.currentRoom === roomId) {
+        return socket.emit("room:joined", {
+          roomId,
+          message: "Already inside this room",
+          driver: room.driver,
+        });
+      }
 
-      await room.populate("driver", "username email avatar");
+      /*
+       * Leave previous realtime room.
+       */
+
+      if (socket.currentRoom) {
+        const previousRoomId =
+          socket.currentRoom;
+
+        const previousRoom =
+          await Room.findById(previousRoomId);
+
+        if (previousRoom) {
+          /*
+           * If this socket's user was the driver,
+           * release control.
+           */
+
+          if (
+            isDriver(previousRoom, userId)
+          ) {
+            previousRoom.driver = null;
+            await previousRoom.save();
+
+            io.to(previousRoomId).emit(
+              "control:released",
+              {
+                roomId: previousRoomId,
+                previousDriver: userId,
+                reason: "driver_left",
+              }
+            );
+          }
+
+          socket.leave(previousRoomId);
+
+          io.to(previousRoomId).emit(
+            "room:user-left",
+            {
+              roomId: previousRoomId,
+              userId,
+            }
+          );
+        }
+
+        socket.currentRoom = null;
+      }
+
+      /*
+       * Join new Socket.IO room.
+       */
+
+      socket.join(roomId);
+      socket.currentRoom = roomId;
+
+      await populateRoom(room);
 
       socket.emit("room:joined", {
-        roomId: room._id,
+        roomId,
         message: "Joined room successfully",
-        driver: room.driver || null,
+        driver: room.driver,
       });
 
-      // Tell everyone else
-      socket.to(roomId).emit("room:user-joined", {
-        user: {
-          id: socket.user.id,
-          username: socket.user.username,
-        },
-      });
+      socket.to(roomId).emit(
+        "room:user-joined",
+        {
+          roomId,
+          user: {
+            id: socket.user.id,
+            username: socket.user.username,
+          },
+        }
+      );
     } catch (error) {
-      console.error("room:join error:", error);
+      console.error(
+        "SOCKET ROOM JOIN ERROR:",
+        error
+      );
 
-      socket.emit("room:error", {
-        message: "Failed to join room",
-      });
+      emitError(
+        "room:error",
+        "Failed to join room"
+      );
     }
   });
 
   /*
-  ==========================================
-  LEAVE ROOM
-  ==========================================
+  |--------------------------------------------------------------------------
+  | LEAVE REALTIME ROOM
+  |--------------------------------------------------------------------------
   */
 
-  socket.on("room:leave", async ({ roomId }) => {
+  socket.on("room:leave", async (data) => {
     try {
+      const roomId =
+        typeof data === "string"
+          ? data
+          : data?.roomId;
+
       if (!roomId) {
-        return socket.emit("room:error", {
-          message: "Room ID is required",
-        });
+        return emitError(
+          "room:error",
+          "Room ID is required"
+        );
+      }
+
+      if (socket.currentRoom !== roomId) {
+        return emitError(
+          "room:error",
+          "You are not inside this room"
+        );
       }
 
       const room = await Room.findById(roomId);
 
-      if (!room) {
-        return socket.emit("room:error", {
-          message: "Room not found",
-        });
+      const userId = getUserId();
+
+      if (room) {
+        /*
+         * Release driver if necessary.
+         */
+
+        if (isDriver(room, userId)) {
+          room.driver = null;
+          await room.save();
+
+          io.to(roomId).emit(
+            "control:released",
+            {
+              roomId,
+              previousDriver: userId,
+              reason: "driver_left",
+            }
+          );
+        }
+
+        socket.to(roomId).emit(
+          "room:user-left",
+          {
+            roomId,
+            userId,
+          }
+        );
       }
-
-      /*
-      If the person leaving is the driver,
-      release the driver slot.
-      */
-
-      if (
-        room.driver &&
-        room.driver.toString() === socket.user.id
-      ) {
-        room.driver = null;
-
-        await room.save();
-
-        io.to(roomId).emit("control:released", {
-          roomId,
-          driver: null,
-          reason: "driver_left",
-        });
-      }
-
-      socket.to(roomId).emit("room:user-left", {
-        user: {
-          id: socket.user.id,
-          username: socket.user.username,
-        },
-      });
 
       socket.leave(roomId);
-
       socket.currentRoom = null;
 
       socket.emit("room:left", {
@@ -144,184 +284,231 @@ const roomSocket = (io, socket) => {
         message: "Left room successfully",
       });
     } catch (error) {
-      console.error("room:leave error:", error);
+      console.error(
+        "SOCKET ROOM LEAVE ERROR:",
+        error
+      );
 
-      socket.emit("room:error", {
-        message: "Failed to leave room",
-      });
+      emitError(
+        "room:error",
+        "Failed to leave room"
+      );
     }
   });
 
   /*
-  ==========================================
-  REQUEST CONTROL
-  ==========================================
+  |--------------------------------------------------------------------------
+  | REQUEST CONTROL
+  |--------------------------------------------------------------------------
   */
 
-  socket.on("control:request", async ({ roomId }) => {
+  socket.on("control:request", async (data) => {
     try {
+      const { roomId } = data || {};
+
       if (!roomId) {
-        return socket.emit("control:error", {
-          message: "Room ID is required",
-        });
+        return emitError(
+          "control:error",
+          "Room ID is required"
+        );
+      }
+
+      if (socket.currentRoom !== roomId) {
+        return emitError(
+          "control:error",
+          "You are not inside this room"
+        );
       }
 
       const room = await Room.findById(roomId);
 
       if (!room) {
-        return socket.emit("control:error", {
-          message: "Room not found",
-        });
+        return emitError(
+          "control:error",
+          "Room not found"
+        );
       }
 
-      // Must be inside the Socket.IO room
-      if (!socket.rooms.has(roomId)) {
-        return socket.emit("control:error", {
-          message: "You are not inside this room",
-        });
-      }
+      const userId = getUserId();
 
-      // Check membership
-      const isMember = room.members.some(
-        (member) =>
-          member.user.toString() === socket.user.id
-      );
-
-      if (!isMember) {
-        return socket.emit("control:error", {
-          message: "You are not a member of this room",
-        });
-      }
-
-      // Already driver
-      if (
-        room.driver &&
-        room.driver.toString() === socket.user.id
-      ) {
-        return socket.emit("control:error", {
-          message: "You already have control",
-        });
+      if (!isMember(room, userId)) {
+        return emitError(
+          "control:error",
+          "You are not a member of this room"
+        );
       }
 
       /*
-      Nobody currently has control.
+       * Check room setting.
+       */
 
-      In this situation we can give control directly
-      to the requester because there is no driver to approve.
-      */
+      if (
+        !room.settings.allowControlRequests
+      ) {
+        return emitError(
+          "control:error",
+          "Control requests are disabled by the room owner"
+        );
+      }
+
+      /*
+       * Already driver.
+       */
+
+      if (isDriver(room, userId)) {
+        return emitError(
+          "control:error",
+          "You already have control"
+        );
+      }
+
+      /*
+       * No driver currently exists.
+       */
 
       if (!room.driver) {
-        room.driver = socket.user.id;
+        room.driver = userId;
 
         await room.save();
 
         await room.populate(
           "driver",
-          "username email avatar"
+          "username email avatar status"
         );
 
-        io.to(roomId).emit("control:changed", {
-          roomId,
-          driver: room.driver,
-          reason: "control_requested_when_free",
-        });
+        io.to(roomId).emit(
+          "control:changed",
+          {
+            roomId,
+            driver: room.driver,
+            previousDriver: null,
+            reason:
+              "control_requested_when_free",
+          }
+        );
 
         return;
       }
 
       /*
-      Someone already controls the room.
+       * A driver already exists.
+       *
+       * Ask current driver for approval.
+       */
 
-      The current driver must approve the request.
-      */
+      await room.populate(
+        "driver",
+        "username email avatar status"
+      );
 
-      io.to(roomId).emit("control:requested", {
-        roomId,
+      const requester = {
+        id: socket.user.id,
+        username: socket.user.username,
+      };
 
-        requester: {
-          id: socket.user.id,
-          username: socket.user.username,
-        },
-
-        currentDriver: room.driver,
-      });
+      io.to(roomId).emit(
+        "control:requested",
+        {
+          roomId,
+          requester,
+          currentDriver: room.driver,
+        }
+      );
     } catch (error) {
-      console.error("control:request error:", error);
+      console.error(
+        "CONTROL REQUEST ERROR:",
+        error
+      );
 
-      socket.emit("control:error", {
-        message: "Failed to request control",
-      });
+      emitError(
+        "control:error",
+        "Failed to request control"
+      );
     }
   });
 
   /*
-  ==========================================
-  APPROVE CONTROL
-  ==========================================
+  |--------------------------------------------------------------------------
+  | APPROVE CONTROL REQUEST
+  |--------------------------------------------------------------------------
   */
 
   socket.on(
     "control:approve",
-    async ({ roomId, userId }) => {
+    async (data) => {
       try {
+        const { roomId, userId } = data || {};
+
         if (!roomId || !userId) {
-          return socket.emit("control:error", {
-            message: "Room ID and user ID are required",
-          });
+          return emitError(
+            "control:error",
+            "Room ID and user ID are required"
+          );
         }
 
-        const room = await Room.findById(roomId);
+        if (socket.currentRoom !== roomId) {
+          return emitError(
+            "control:error",
+            "You are not inside this room"
+          );
+        }
+
+        const room =
+          await Room.findById(roomId);
 
         if (!room) {
-          return socket.emit("control:error", {
-            message: "Room not found",
-          });
+          return emitError(
+            "control:error",
+            "Room not found"
+          );
         }
 
+        const currentUserId =
+          getUserId();
+
         /*
-        ONLY CURRENT DRIVER CAN APPROVE
-        */
+         * Only current driver can approve.
+         */
 
         if (
-          !room.driver ||
-          room.driver.toString() !== socket.user.id
+          !isDriver(
+            room,
+            currentUserId
+          )
         ) {
-          return socket.emit("control:error", {
-            message:
-              "Only the current driver can approve control",
-          });
+          return emitError(
+            "control:error",
+            "Only the current driver can approve control requests"
+          );
         }
 
         /*
-        Target must be a room member.
-        */
+         * Cannot approve yourself.
+         */
 
-        const targetMember = room.members.find(
-          (member) =>
-            member.user.toString() === userId
-        );
-
-        if (!targetMember) {
-          return socket.emit("control:error", {
-            message: "User is not a member of this room",
-          });
+        if (
+          currentUserId ===
+          userId.toString()
+        ) {
+          return emitError(
+            "control:error",
+            "You already have control"
+          );
         }
 
         /*
-        Prevent transferring control to yourself.
-        */
+         * Target must be a member.
+         */
 
-        if (userId === socket.user.id) {
-          return socket.emit("control:error", {
-            message: "You already have control",
-          });
+        if (!isMember(room, userId)) {
+          return emitError(
+            "control:error",
+            "User is not a member of this room"
+          );
         }
 
-        /*
-        TRANSFER DRIVER
-        */
-
-        const previousDriver = room.driver;
+        const previousDriver =
+          room.driver;
 
         room.driver = userId;
 
@@ -329,160 +516,191 @@ const roomSocket = (io, socket) => {
 
         await room.populate(
           "driver",
-          "username email avatar"
+          "username email avatar status"
         );
 
-        /*
-        Tell EVERYONE the new driver.
-        */
-
-        io.to(roomId).emit("control:changed", {
-          roomId,
-
-          driver: room.driver,
-
-          previousDriver,
-
-          reason: "control_transferred",
-        });
+        io.to(roomId).emit(
+          "control:changed",
+          {
+            roomId,
+            driver: room.driver,
+            previousDriver,
+            reason: "control_transferred",
+          }
+        );
       } catch (error) {
-        console.error("control:approve error:", error);
+        console.error(
+          "CONTROL APPROVE ERROR:",
+          error
+        );
 
-        socket.emit("control:error", {
-          message: "Failed to approve control",
-        });
+        emitError(
+          "control:error",
+          "Failed to approve control request"
+        );
       }
     }
   );
 
   /*
-  ==========================================
-  REJECT CONTROL
-  ==========================================
+  |--------------------------------------------------------------------------
+  | REJECT CONTROL REQUEST
+  |--------------------------------------------------------------------------
   */
 
   socket.on(
     "control:reject",
-    async ({ roomId, userId }) => {
+    async (data) => {
       try {
+        const { roomId, userId } = data || {};
+
         if (!roomId || !userId) {
-          return socket.emit("control:error", {
-            message: "Room ID and user ID are required",
-          });
+          return emitError(
+            "control:error",
+            "Room ID and user ID are required"
+          );
         }
 
-        const room = await Room.findById(roomId);
+        if (socket.currentRoom !== roomId) {
+          return emitError(
+            "control:error",
+            "You are not inside this room"
+          );
+        }
+
+        const room =
+          await Room.findById(roomId);
 
         if (!room) {
-          return socket.emit("control:error", {
-            message: "Room not found",
-          });
+          return emitError(
+            "control:error",
+            "Room not found"
+          );
         }
 
+        const currentUserId =
+          getUserId();
+
         /*
-        ONLY CURRENT DRIVER CAN REJECT
-        */
+         * Only current driver can reject.
+         */
 
         if (
-          !room.driver ||
-          room.driver.toString() !== socket.user.id
+          !isDriver(
+            room,
+            currentUserId
+          )
         ) {
-          return socket.emit("control:error", {
-            message:
-              "Only the current driver can reject control",
-          });
+          return emitError(
+            "control:error",
+            "Only the current driver can reject control requests"
+          );
         }
 
-        /*
-        Verify requester is actually a member.
-        */
+        if (!isMember(room, userId)) {
+          return emitError(
+            "control:error",
+            "User is not a member of this room"
+          );
+        }
 
-        const isMember = room.members.some(
-          (member) =>
-            member.user.toString() === userId
+        io.to(roomId).emit(
+          "control:rejected",
+          {
+            roomId,
+            userId,
+            rejectedBy: currentUserId,
+          }
+        );
+      } catch (error) {
+        console.error(
+          "CONTROL REJECT ERROR:",
+          error
         );
 
-        if (!isMember) {
-          return socket.emit("control:error", {
-            message: "User is not a member of this room",
-          });
-        }
-
-        io.to(roomId).emit("control:rejected", {
-          roomId,
-          userId,
-        });
-      } catch (error) {
-        console.error("control:reject error:", error);
-
-        socket.emit("control:error", {
-          message: "Failed to reject control request",
-        });
+        emitError(
+          "control:error",
+          "Failed to reject control request"
+        );
       }
     }
   );
 
   /*
-  ==========================================
-  RELEASE CONTROL
-  ==========================================
+  |--------------------------------------------------------------------------
+  | RELEASE CONTROL
+  |--------------------------------------------------------------------------
   */
 
-  socket.on("control:release", async ({ roomId }) => {
-    try {
-      if (!roomId) {
-        return socket.emit("control:error", {
-          message: "Room ID is required",
-        });
+  socket.on(
+    "control:release",
+    async (data) => {
+      try {
+        const { roomId } = data || {};
+
+        if (!roomId) {
+          return emitError(
+            "control:error",
+            "Room ID is required"
+          );
+        }
+
+        if (socket.currentRoom !== roomId) {
+          return emitError(
+            "control:error",
+            "You are not inside this room"
+          );
+        }
+
+        const room =
+          await Room.findById(roomId);
+
+        if (!room) {
+          return emitError(
+            "control:error",
+            "Room not found"
+          );
+        }
+
+        const userId = getUserId();
+
+        if (!isDriver(room, userId)) {
+          return emitError(
+            "control:error",
+            "Only the current driver can release control"
+          );
+        }
+
+        room.driver = null;
+
+        await room.save();
+
+        io.to(roomId).emit(
+          "control:released",
+          {
+            roomId,
+            previousDriver: userId,
+            reason: "driver_released",
+          }
+        );
+      } catch (error) {
+        console.error(
+          "CONTROL RELEASE ERROR:",
+          error
+        );
+
+        emitError(
+          "control:error",
+          "Failed to release control"
+        );
       }
-
-      const room = await Room.findById(roomId);
-
-      if (!room) {
-        return socket.emit("control:error", {
-          message: "Room not found",
-        });
-      }
-
-      /*
-      ONLY CURRENT DRIVER CAN RELEASE
-      */
-
-      if (
-        !room.driver ||
-        room.driver.toString() !== socket.user.id
-      ) {
-        return socket.emit("control:error", {
-          message: "You are not the current driver",
-        });
-      }
-
-      room.driver = null;
-
-      await room.save();
-
-      /*
-      Nobody automatically becomes driver.
-      */
-
-      io.to(roomId).emit("control:released", {
-        roomId,
-        driver: null,
-        reason: "driver_released",
-      });
-    } catch (error) {
-      console.error("control:release error:", error);
-
-      socket.emit("control:error", {
-        message: "Failed to release control",
-      });
     }
-  });
+  );
 
   /*
-  ==========================================
-  DISCONNECT
-  ==========================================
+  |--------------------------------------------------------------------------
+  | DISCONNECT
+  |--------------------------------------------------------------------------
   */
 
   socket.on("disconnect", async () => {
@@ -493,42 +711,47 @@ const roomSocket = (io, socket) => {
         return;
       }
 
-      const room = await Room.findById(roomId);
+      const room =
+        await Room.findById(roomId);
 
       if (!room) {
         return;
       }
 
-      /*
-      If disconnected user was the driver,
-      release the driver.
-      */
+      const userId = getUserId();
 
-      if (
-        room.driver &&
-        room.driver.toString() === socket.user.id
-      ) {
+      /*
+       * Release driver if disconnected user
+       * was the current driver.
+       */
+
+      if (isDriver(room, userId)) {
         room.driver = null;
 
         await room.save();
 
-        io.to(roomId).emit("control:released", {
-          roomId,
-          driver: null,
-          reason: "driver_disconnected",
-        });
+        io.to(roomId).emit(
+          "control:released",
+          {
+            roomId,
+            previousDriver: userId,
+            reason: "driver_disconnected",
+          }
+        );
       }
 
-      socket.to(roomId).emit("room:user-left", {
-        user: {
-          id: socket.user.id,
-          username: socket.user.username,
-        },
-      });
+      io.to(roomId).emit(
+        "room:user-left",
+        {
+          roomId,
+          userId,
+        }
+      );
     } catch (error) {
-      console.error("disconnect room cleanup error:", error);
+      console.error(
+        "SOCKET DISCONNECT ERROR:",
+        error
+      );
     }
   });
 };
-
-module.exports = roomSocket;

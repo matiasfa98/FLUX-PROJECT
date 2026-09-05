@@ -1,7 +1,13 @@
-const Room = require("../models/Room");
 const Document = require("../models/Document");
+const Room = require("../models/Room");
 
-const editorSocket = (io, socket) => {
+module.exports = (io, socket) => {
+  /*
+  |--------------------------------------------------------------------------
+  | EDITOR CHANGE
+  |--------------------------------------------------------------------------
+  */
+
   socket.on("editor:change", async (data) => {
     try {
       const {
@@ -9,124 +15,149 @@ const editorSocket = (io, socket) => {
         documentId,
         content,
         language,
-        version
-      } = data;
+        version,
+      } = data || {};
 
-      // -------------------------
-      // Validate input
-      // -------------------------
+      /*
+       * Validate input
+       */
 
-      if (!roomId) {
+      if (!roomId || !documentId) {
         return socket.emit("editor:error", {
-          message: "Room ID is required"
-        });
-      }
-
-      if (!documentId) {
-        return socket.emit("editor:error", {
-          message: "Document ID is required"
+          message:
+            "Room ID and document ID are required",
         });
       }
 
       if (typeof content !== "string") {
         return socket.emit("editor:error", {
-          message: "Invalid editor content"
+          message: "Content must be a string",
         });
       }
 
       if (content.length > 1000000) {
         return socket.emit("editor:error", {
-          message: "Code is too large"
+          message:
+            "Document content is too large",
         });
       }
 
-      // -------------------------
-      // Find room
-      // -------------------------
+      /*
+       * Socket must actually be inside this room.
+       */
 
-      const room = await Room.findById(roomId);
+      if (socket.currentRoom !== roomId) {
+        return socket.emit("editor:error", {
+          message:
+            "You are not inside this room",
+        });
+      }
+
+      /*
+       * Get room
+       */
+
+      const room =
+        await Room.findById(roomId);
 
       if (!room) {
         return socket.emit("editor:error", {
-          message: "Room not found"
+          message: "Room not found",
         });
       }
 
-      // -------------------------
-// Check membership
-// -------------------------
+      /*
+       * Check membership.
+       */
 
-const isMember = room.members.some(
-  (member) =>
-    member.user.toString() === socket.user.id
-);
+      const isMember = room.members.some(
+        (member) =>
+          member.user.toString() ===
+          socket.user.id.toString()
+      );
 
-if (!isMember) {
-  return socket.emit("editor:error", {
-    message: "You are not a member of this room"
-  });
-}
-
-
-// -------------------------
-// Check driver
-// -------------------------
-
-if (
-  !room.driver ||
-  room.driver.toString() !== socket.user.id
-) {
-  return socket.emit("editor:error", {
-    message: "You do not have control of the shared editor"
-  });
-}
-
-      // -------------------------
-      // Check socket room
-      // -------------------------
-
-      if (!socket.rooms.has(roomId)) {
+      if (!isMember) {
         return socket.emit("editor:error", {
-          message: "You are not connected to this room"
+          message:
+            "You are not a member of this room",
         });
       }
 
-      // -------------------------
-      // Find document
-      // -------------------------
+      /*
+       * There must be a driver.
+       */
 
-      const document = await Document.findById(documentId);
+      if (!room.driver) {
+        return socket.emit("editor:error", {
+          message:
+            "Nobody currently has control of the editor",
+        });
+      }
+
+      /*
+       * ONLY the current driver can edit.
+       */
+
+      if (
+        room.driver.toString() !==
+        socket.user.id.toString()
+      ) {
+        return socket.emit("editor:error", {
+          message:
+            "You do not have control of the shared editor",
+        });
+      }
+
+      /*
+       * Find document.
+       */
+
+      const document =
+        await Document.findById(documentId);
 
       if (!document) {
         return socket.emit("editor:error", {
-          message: "Document not found"
+          message: "Document not found",
         });
       }
 
-      // Make sure document belongs to this room
-      if (document.room.toString() !== roomId) {
+      /*
+       * Document must belong to this room.
+       */
+
+      if (
+        document.room.toString() !==
+        roomId.toString()
+      ) {
         return socket.emit("editor:error", {
-          message: "Document does not belong to this room"
+          message:
+            "This document does not belong to this room",
         });
       }
 
-      // -------------------------
-      // Version check
-      // -------------------------
+      /*
+       * Version conflict protection.
+       *
+       * If the client is editing an old version,
+       * reject the update.
+       */
 
       if (
         version !== undefined &&
-        version !== document.version
+        Number(version) !==
+          Number(document.version)
       ) {
-        return socket.emit("editor:error", {
-          message: "Document version conflict",
-          currentVersion: document.version
+        return socket.emit("editor:conflict", {
+          message:
+            "Document version conflict",
+          currentVersion:
+            document.version,
         });
       }
 
-      // -------------------------
-      // Update document
-      // -------------------------
+      /*
+       * Update document.
+       */
 
       document.content = content;
 
@@ -135,43 +166,51 @@ if (
       }
 
       document.updatedBy = socket.user.id;
-      document.version += 1;
+
+      document.version =
+        Number(document.version) + 1;
 
       await document.save();
 
-      // -------------------------
-      // Broadcast change
-      // -------------------------
+      /*
+       * Send change to everyone else in room.
+       */
 
-      socket.to(roomId).emit("editor:change", {
-        roomId,
-        documentId,
-        content: document.content,
-        language: document.language,
-        version: document.version,
-        user: {
-          id: socket.user.id,
-          username: socket.user.username
+      socket.to(roomId).emit(
+        "editor:change",
+        {
+          roomId,
+          documentId,
+          content: document.content,
+          language: document.language,
+          version: document.version,
+          updatedBy: {
+            id: socket.user.id,
+            username:
+              socket.user.username,
+          },
         }
-      });
+      );
 
-      // -------------------------
-      // Tell sender the saved version
-      // -------------------------
+      /*
+       * Confirm save to driver.
+       */
 
       socket.emit("editor:saved", {
+        roomId,
         documentId,
-        version: document.version
+        version: document.version,
       });
-
     } catch (error) {
-      console.error("Editor change error:", error);
+      console.error(
+        "EDITOR CHANGE ERROR:",
+        error
+      );
 
       socket.emit("editor:error", {
-        message: "Failed to sync editor"
+        message:
+          "Failed to save editor change",
       });
     }
   });
 };
-
-module.exports = editorSocket;

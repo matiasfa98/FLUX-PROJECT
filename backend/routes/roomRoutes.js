@@ -5,48 +5,109 @@ const {
   getMyRooms,
   getRoom,
   joinRoom,
+  getJoinRequests,
+  approveJoinRequest,
+  rejectJoinRequest,
+  updateRoomSettings,
   leaveRoom,
-  deleteRoom
+  deleteRoom,
 } = require("../controllers/roomController");
 
-const protect = require("../middleware/authMiddleware");
+const authMiddleware = require("../middleware/authMiddleware");
 
 const router = express.Router();
 
+/*
+|--------------------------------------------------------------------------
+| All room routes require authentication
+|--------------------------------------------------------------------------
+*/
 
-// Every room route requires authentication
+router.use(authMiddleware);
 
-router.use(protect);
-
-
-// Create room
+/*
+|--------------------------------------------------------------------------
+| Room creation
+|--------------------------------------------------------------------------
+*/
 
 router.post("/", createRoom);
 
-
-// Get my rooms
+/*
+|--------------------------------------------------------------------------
+| Get rooms belonging to current user
+|--------------------------------------------------------------------------
+*/
 
 router.get("/", getMyRooms);
 
+/*
+|--------------------------------------------------------------------------
+| Join requests
+|--------------------------------------------------------------------------
+|
+| IMPORTANT:
+| These routes must come BEFORE "/:id"
+| so Express doesn't accidentally interpret
+| "join-requests" as a room ID.
+|
+|--------------------------------------------------------------------------
+*/
 
-// Get one room
+router.get("/:id/join-requests", getJoinRequests);
 
-router.get("/:id", getRoom);
+router.post(
+  "/:id/join-requests/:userId/approve",
+  approveJoinRequest
+);
 
+router.post(
+  "/:id/join-requests/:userId/reject",
+  rejectJoinRequest
+);
 
-// Join room
+/*
+|--------------------------------------------------------------------------
+| Room settings
+|--------------------------------------------------------------------------
+*/
+
+router.patch("/:id/settings", updateRoomSettings);
+
+/*
+|--------------------------------------------------------------------------
+| Join room
+|--------------------------------------------------------------------------
+*/
 
 router.post("/:id/join", joinRoom);
 
-
-// Leave room
+/*
+|--------------------------------------------------------------------------
+| Leave room
+|--------------------------------------------------------------------------
+*/
 
 router.post("/:id/leave", leaveRoom);
 
-
-// Delete room
+/*
+|--------------------------------------------------------------------------
+| Delete room
+|--------------------------------------------------------------------------
+*/
 
 router.delete("/:id", deleteRoom);
 
+/*
+|--------------------------------------------------------------------------
+| Get single room
+|--------------------------------------------------------------------------
+|
+| Keep this AFTER the more specific routes above.
+|
+|--------------------------------------------------------------------------
+*/
+
+router.get("/:id", getRoom);
 
 module.exports = router;
