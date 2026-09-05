@@ -1,0 +1,145 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #101216;
+  color: #eee;
+  font-family: Arial, sans-serif;
+}
+
+button,
+input {
+  font-family: inherit;
+}
+
+button {
+  border: 1px solid #363b44;
+  background: #1d2128;
+  color: #eee;
+  padding: 9px 14px;
+  border-radius: 5px;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #292e36;
+}
+
+input {
+  width: 100%;
+  padding: 10px;
+  margin-bottom: 10px;
+
+  background: #171a20;
+  color: white;
+
+  border: 1px solid #30353e;
+  border-radius: 5px;
+
+  outline: none;
+}
+
+input:focus {
+  border-color: #555c68;
+}
+
+.app {
+  width: 900px;
+  max-width: calc(100% - 30px);
+
+  margin: 30px auto;
+}
+
+h1 {
+  margin-bottom: 25px;
+}
+
+.card {
+  background: #15181e;
+
+  border: 1px solid #292e36;
+  border-radius: 8px;
+
+  padding: 18px;
+
+  margin-bottom: 15px;
+}
+
+.card h2 {
+  margin-top: 0;
+  font-size: 16px;
+}
+
+.buttons {
+  display: flex;
+  gap: 8px;
+
+  flex-wrap: wrap;
+
+  margin-top: 5px;
+}
+
+.token,
+.socket-status {
+  display: inline-block;
+
+  margin-top: 12px;
+
+  font-size: 13px;
+  color: #aeb4be;
+}
+
+pre {
+  margin-top: 15px;
+
+  padding: 12px;
+
+  background: #0d0f13;
+
+  border: 1px solid #292e36;
+
+  border-radius: 5px;
+
+  overflow: auto;
+
+  font-size: 12px;
+}
+
+.log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logs {
+  background: #0d0f13;
+
+  border: 1px solid #292e36;
+
+  border-radius: 5px;
+
+  padding: 10px;
+
+  min-height: 180px;
+
+  max-height: 350px;
+
+  overflow-y: auto;
+}
+
+.log {
+  padding: 7px 5px;
+
+  border-bottom: 1px solid #20242b;
+
+  font-family: Consolas, monospace;
+
+  font-size: 12px;
+}
+
+.empty {
+  color: #656c77;
+  font-size: 13px;
+}

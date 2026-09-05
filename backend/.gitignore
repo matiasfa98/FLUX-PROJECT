@@ -1,0 +1,40 @@
+# Node.js
+node_modules/
+.npm/
+.env
+.env.*
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build output
+build/
+dist/
+out/
+.next/
+coverage/
+
+# Editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Optional: lockfiles you may not want to track
+# package-lock.json
+# yarn.lock
+# pnpm-lock.yaml
