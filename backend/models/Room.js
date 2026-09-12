@@ -156,6 +156,10 @@ const roomSchema = new mongoose.Schema(
         default: false,
       },
     },
+    driverDisconnectedAt: {
+  type: Date,
+  default: null,
+},
   },
   {
     timestamps: true,

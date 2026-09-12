@@ -3,6 +3,9 @@ const jwt = require("jsonwebtoken");
 const roomSocket = require("./roomSocket");
 const chatSocket = require("./chatSocket");
 const editorSocket = require("./editorSocket");
+const setupFileSocket = require("./fileSocket");
+const setupTerminalSocket = require("./terminalSocket");
+const setupWebRTCSocket = require("./webrtcSocket");
 
 module.exports = (io) => {
   /*
@@ -28,12 +31,14 @@ module.exports = (io) => {
       );
 
       socket.user = {
-        id: decoded.id,
-        username: decoded.username,
-        email: decoded.email,
-      };
+  id: decoded.id,
+  username: decoded.username,
+  email: decoded.email,
+};
 
-      next();
+socket.clientType = socket.handshake.auth?.clientType || "web";
+
+next();
     } catch (error) {
       console.error(
         "SOCKET AUTH ERROR:",
@@ -70,6 +75,20 @@ module.exports = (io) => {
     ROOM SOCKET EVENTS
     ========================================
     */
+       // Auto-join all conversations this user is a participant in.
+    (async () => {
+      try {
+        const Conversation = require("../models/Conversation");
+        const convs = await Conversation.find({
+          "participants.user": socket.user.id,
+        }).select("_id");
+        for (const c of convs) {
+          socket.join(`conv:${c._id}`);
+        }
+      } catch (err) {
+        console.error("AUTO-JOIN CONVERSATIONS ERROR:", err.message);
+      }
+    })();
 
     roomSocket(io, socket);
 
@@ -88,6 +107,14 @@ module.exports = (io) => {
     */
 
     editorSocket(io, socket);
+
+
+
+    setupFileSocket(io, socket);
+
+    setupTerminalSocket(io, socket);
+
+    setupWebRTCSocket(io, socket);   //
 
     /*
     ========================================
@@ -119,5 +146,6 @@ module.exports = (io) => {
 
       socket.currentRoom = null;
     });
+    
   });
 };

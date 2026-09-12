@@ -1,64 +1,68 @@
-const Document = require("../models/Document");
+// backend/sockets/editorSocket.js
+const File = require("../models/File");
 const Room = require("../models/Room");
+const fileService = require("../services/fileService");
 
 module.exports = (io, socket) => {
   /*
   |--------------------------------------------------------------------------
-  | EDITOR CHANGE
+  | CODE UPDATE (single-writer mutex, fileId-based, disk-first)
+  |--------------------------------------------------------------------------
+  |
+  | Client payload:
+  |   { roomId, fileId, code, version? }
+  |
+  | Flow:
+  |   1. Validate socket is inside the room.
+  |   2. Validate the room and the driver mutex.
+  |   3. Find the File doc; it carries the canonical disk `path`.
+  |   4. (Optional) Reject on stale version.
+  |   5. Write buffer to disk FIRST.
+  |   6. Bump index bookkeeping (size, version, updatedBy, language).
+  |   7. Broadcast code:sync to peers; ack to sender.
+  |
+  | Disk is truth. If step 5 fails, nothing is persisted and the caller
+  | receives editor:error. If step 6 fails, disk already has the correct
+  | content; the index is stale until the next reconcile.
+  |
   |--------------------------------------------------------------------------
   */
 
-  socket.on("editor:change", async (data) => {
+  socket.on("code:update", async (data) => {
     try {
-      const {
-        roomId,
-        documentId,
-        content,
-        language,
-        version,
-      } = data || {};
+      const { roomId, fileId, code, version, language } = data || {};
 
-      /*
-       * Validate input
-       */
-
-      if (!roomId || !documentId) {
+      // ---------------------------------------------------------------
+      // Validation
+      // ---------------------------------------------------------------
+      if (!roomId || !fileId) {
         return socket.emit("editor:error", {
-          message:
-            "Room ID and document ID are required",
+          message: "Room ID and file ID are required",
         });
       }
 
-      if (typeof content !== "string") {
+      if (typeof code !== "string") {
         return socket.emit("editor:error", {
-          message: "Content must be a string",
+          message: "Code payload must be a string",
         });
       }
 
-      if (content.length > 1000000) {
+      if (code.length > 1_000_000) {
         return socket.emit("editor:error", {
-          message:
-            "Document content is too large",
+          message: "Buffer exceeds the 1 MB per-file limit",
         });
       }
-
-      /*
-       * Socket must actually be inside this room.
-       */
 
       if (socket.currentRoom !== roomId) {
         return socket.emit("editor:error", {
-          message:
-            "You are not inside this room",
+          message: "You are not inside this room",
         });
       }
 
-      /*
-       * Get room
-       */
-
-      const room =
-        await Room.findById(roomId);
+      // ---------------------------------------------------------------
+      // Room + driver mutex
+      // ---------------------------------------------------------------
+      const room = await Room.findById(roomId);
 
       if (!room) {
         return socket.emit("editor:error", {
@@ -66,150 +70,92 @@ module.exports = (io, socket) => {
         });
       }
 
-      /*
-       * Check membership.
-       */
-
-      const isMember = room.members.some(
-        (member) =>
-          member.user.toString() ===
-          socket.user.id.toString()
-      );
-
-      if (!isMember) {
-        return socket.emit("editor:error", {
-          message:
-            "You are not a member of this room",
-        });
-      }
-
-      /*
-       * There must be a driver.
-       */
-
-      if (!room.driver) {
-        return socket.emit("editor:error", {
-          message:
-            "Nobody currently has control of the editor",
-        });
-      }
-
-      /*
-       * ONLY the current driver can edit.
-       */
-
       if (
-        room.driver.toString() !==
-        socket.user.id.toString()
+        !room.driver ||
+        room.driver.toString() !== socket.user.id.toString()
       ) {
         return socket.emit("editor:error", {
-          message:
-            "You do not have control of the shared editor",
+          message: "You do not hold the active driver write-mutex",
         });
       }
 
-      /*
-       * Find document.
-       */
+      // ---------------------------------------------------------------
+      // File lookup — `path` is the canonical disk location.
+      // ---------------------------------------------------------------
+      const file = await File.findOne({
+        _id: fileId,
+        room: roomId,
+        type: "file",
+      });
 
-      const document =
-        await Document.findById(documentId);
-
-      if (!document) {
+      if (!file) {
         return socket.emit("editor:error", {
-          message: "Document not found",
+          message: "File not found in this room",
         });
       }
 
-      /*
-       * Document must belong to this room.
-       */
-
-      if (
-        document.room.toString() !==
-        roomId.toString()
-      ) {
-        return socket.emit("editor:error", {
-          message:
-            "This document does not belong to this room",
-        });
-      }
-
-      /*
-       * Version conflict protection.
-       *
-       * If the client is editing an old version,
-       * reject the update.
-       */
-
+      // ---------------------------------------------------------------
+      // Optional optimistic concurrency guard.
+      // ---------------------------------------------------------------
       if (
         version !== undefined &&
-        Number(version) !==
-          Number(document.version)
+        Number(version) !== Number(file.version)
       ) {
         return socket.emit("editor:conflict", {
-          message:
-            "Document version conflict",
-          currentVersion:
-            document.version,
+          fileId: String(file._id),
+          currentVersion: file.version,
         });
       }
 
-      /*
-       * Update document.
-       */
-
-      document.content = content;
-
-      if (language) {
-        document.language = language;
+      // ---------------------------------------------------------------
+      // DISK FIRST
+      // ---------------------------------------------------------------
+      try {
+        await fileService.writeFile(roomId, file.path, code);
+      } catch (fsErr) {
+        console.error(
+          "Failed to write live buffer to disk:",
+          fsErr.message
+        );
+        return socket.emit("editor:error", {
+          message: "Failed to persist buffer to disk",
+        });
       }
 
-      document.updatedBy = socket.user.id;
+      // ---------------------------------------------------------------
+      // Index bookkeeping (non-authoritative)
+      // ---------------------------------------------------------------
+      file.size = Buffer.byteLength(code, "utf8");
+      file.version = Number(file.version) + 1;
+      file.updatedBy = socket.user.id;
+      if (typeof language === "string" && language.trim()) {
+        file.language = language.trim();
+      }
+      await file.save();
 
-      document.version =
-        Number(document.version) + 1;
+      // ---------------------------------------------------------------
+      // Fan-out to observers
+      // ---------------------------------------------------------------
+      socket.to(roomId).emit("code:sync", {
+        fileId: String(file._id),
+        code,
+        version: file.version,
+        language: file.language,
+        senderId: socket.user.id,
+      });
 
-      await document.save();
-
-      /*
-       * Send change to everyone else in room.
-       */
-
-      socket.to(roomId).emit(
-        "editor:change",
-        {
-          roomId,
-          documentId,
-          content: document.content,
-          language: document.language,
-          version: document.version,
-          updatedBy: {
-            id: socket.user.id,
-            username:
-              socket.user.username,
-          },
-        }
-      );
-
-      /*
-       * Confirm save to driver.
-       */
-
+      // ---------------------------------------------------------------
+      // Ack to the driver
+      // ---------------------------------------------------------------
       socket.emit("editor:saved", {
         roomId,
-        documentId,
-        version: document.version,
+        fileId: String(file._id),
+        version: file.version,
       });
     } catch (error) {
-      console.error(
-        "EDITOR CHANGE ERROR:",
-        error
-      );
-
+      console.error("CODE UPDATE ERROR:", error);
       socket.emit("editor:error", {
-        message:
-          "Failed to save editor change",
+        message: "Failed to sync editor buffer",
       });
     }
   });

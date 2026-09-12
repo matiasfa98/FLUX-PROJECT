@@ -1,8 +1,11 @@
+// backend/routes/roomRoutes.js
 const express = require("express");
 
 const {
   createRoom,
   getMyRooms,
+  searchRooms,
+  peekRoom,
   getRoom,
   joinRoom,
   getJoinRequests,
@@ -14,100 +17,36 @@ const {
 } = require("../controllers/roomController");
 
 const authMiddleware = require("../middleware/authMiddleware");
-
 const router = express.Router();
-
-/*
-|--------------------------------------------------------------------------
-| All room routes require authentication
-|--------------------------------------------------------------------------
-*/
 
 router.use(authMiddleware);
 
-/*
-|--------------------------------------------------------------------------
-| Room creation
-|--------------------------------------------------------------------------
-*/
-
+// Room creation and my rooms
 router.post("/", createRoom);
-
-/*
-|--------------------------------------------------------------------------
-| Get rooms belonging to current user
-|--------------------------------------------------------------------------
-*/
-
 router.get("/", getMyRooms);
 
-/*
-|--------------------------------------------------------------------------
-| Join requests
-|--------------------------------------------------------------------------
-|
-| IMPORTANT:
-| These routes must come BEFORE "/:id"
-| so Express doesn't accidentally interpret
-| "join-requests" as a room ID.
-|
-|--------------------------------------------------------------------------
-*/
+// Public discovery (must come before /:id)
+router.get("/search", searchRooms);
 
+// Invite peek — MUST be public (no auth required) for the invite page.
+// Move this above `router.use(authMiddleware)` if you want anonymous peek.
+// For now, it's protected to keep the surface small.
+router.get("/:id/peek", peekRoom);
+
+// Join requests
 router.get("/:id/join-requests", getJoinRequests);
+router.post("/:id/join-requests/:userId/approve", approveJoinRequest);
+router.post("/:id/join-requests/:userId/reject", rejectJoinRequest);
 
-router.post(
-  "/:id/join-requests/:userId/approve",
-  approveJoinRequest
-);
-
-router.post(
-  "/:id/join-requests/:userId/reject",
-  rejectJoinRequest
-);
-
-/*
-|--------------------------------------------------------------------------
-| Room settings
-|--------------------------------------------------------------------------
-*/
-
+// Room settings
 router.patch("/:id/settings", updateRoomSettings);
 
-/*
-|--------------------------------------------------------------------------
-| Join room
-|--------------------------------------------------------------------------
-*/
-
+// Join / leave / delete
 router.post("/:id/join", joinRoom);
-
-/*
-|--------------------------------------------------------------------------
-| Leave room
-|--------------------------------------------------------------------------
-*/
-
 router.post("/:id/leave", leaveRoom);
-
-/*
-|--------------------------------------------------------------------------
-| Delete room
-|--------------------------------------------------------------------------
-*/
-
 router.delete("/:id", deleteRoom);
 
-/*
-|--------------------------------------------------------------------------
-| Get single room
-|--------------------------------------------------------------------------
-|
-| Keep this AFTER the more specific routes above.
-|
-|--------------------------------------------------------------------------
-*/
-
+// Get single room (keep last)
 router.get("/:id", getRoom);
 
 module.exports = router;

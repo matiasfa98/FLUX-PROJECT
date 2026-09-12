@@ -1,5 +1,6 @@
 const Document = require("../models/Document");
 const Room = require("../models/Room");
+const fileService = require("../services/fileService");
 
 // Check if user is a member of the room
 const isMember = (room, userId) => {
@@ -24,7 +25,6 @@ CREATE DOCUMENT
 POST /api/documents/rooms/:roomId
 ========================================
 */
-
 const createDocument = async (req, res) => {
   try {
     const { roomId } = req.params;
@@ -37,7 +37,6 @@ const createDocument = async (req, res) => {
     }
 
     const room = await Room.findById(roomId);
-
     if (!room) {
       return res.status(404).json({
         message: "Room not found",
@@ -62,6 +61,7 @@ const createDocument = async (req, res) => {
       });
     }
 
+    // 1. Create document in database
     const document = await Document.create({
       room: roomId,
       name: name.trim(),
@@ -82,13 +82,19 @@ const createDocument = async (req, res) => {
       },
     ]);
 
+    // 2. Sync physical file to disk storage folder
+    try {
+      await fileService.writeFile(roomId, name.trim(), content || "");
+    } catch (fsErr) {
+      console.error("Failed to sync new doc to disk:", fsErr.message);
+    }
+
     res.status(201).json({
       message: "Document created successfully",
       document,
     });
   } catch (error) {
     console.error("CREATE DOCUMENT ERROR:", error);
-
     res.status(500).json({
       message: "Failed to create document",
       error: error.message,
@@ -102,11 +108,9 @@ GET ROOM DOCUMENTS
 GET /api/documents/rooms/:roomId
 ========================================
 */
-
 const getRoomDocuments = async (req, res) => {
   try {
     const { roomId } = req.params;
-
     const room = await Room.findById(roomId);
 
     if (!room) {
@@ -121,20 +125,15 @@ const getRoomDocuments = async (req, res) => {
       });
     }
 
-    const documents = await Document.find({
-      room: roomId,
-    })
+    const documents = await Document.find({ room: roomId })
       .select("-content")
       .populate("createdBy", "username avatar")
       .populate("updatedBy", "username avatar")
-      .sort({
-        createdAt: 1,
-      });
+      .sort({ createdAt: 1 });
 
     res.json(documents);
   } catch (error) {
     console.error("GET ROOM DOCUMENTS ERROR:", error);
-
     res.status(500).json({
       message: "Failed to get room documents",
       error: error.message,
@@ -148,11 +147,9 @@ GET SINGLE DOCUMENT
 GET /api/documents/:documentId
 ========================================
 */
-
 const getDocument = async (req, res) => {
   try {
     const { documentId } = req.params;
-
     const document = await Document.findById(documentId)
       .populate("createdBy", "username avatar")
       .populate("updatedBy", "username avatar");
@@ -164,7 +161,6 @@ const getDocument = async (req, res) => {
     }
 
     const room = await Room.findById(document.room);
-
     if (!room) {
       return res.status(404).json({
         message: "Room not found",
@@ -180,7 +176,6 @@ const getDocument = async (req, res) => {
     res.json(document);
   } catch (error) {
     console.error("GET DOCUMENT ERROR:", error);
-
     res.status(500).json({
       message: "Failed to get document",
       error: error.message,
@@ -193,20 +188,13 @@ const getDocument = async (req, res) => {
 UPDATE DOCUMENT
 PUT /api/documents/:documentId
 ========================================
-
-This endpoint is for normal REST updates.
-
-Realtime editing is still handled by editorSocket.js,
-where ONLY the current driver can edit.
 */
-
 const updateDocument = async (req, res) => {
   try {
     const { documentId } = req.params;
     const { content, language, name } = req.body;
 
     const document = await Document.findById(documentId);
-
     if (!document) {
       return res.status(404).json({
         message: "Document not found",
@@ -214,7 +202,6 @@ const updateDocument = async (req, res) => {
     }
 
     const room = await Room.findById(document.room);
-
     if (!room) {
       return res.status(404).json({
         message: "Room not found",
@@ -227,85 +214,52 @@ const updateDocument = async (req, res) => {
       });
     }
 
-    /*
-    ========================================
-    CONTENT
-    ========================================
-    */
-
     if (content !== undefined) {
       if (typeof content !== "string") {
         return res.status(400).json({
           message: "Content must be a string",
         });
       }
-
       if (content.length > 1000000) {
         return res.status(400).json({
           message: "Document content is too large",
         });
       }
-
       document.content = content;
     }
 
-    /*
-    ========================================
-    LANGUAGE
-    ========================================
-    */
-
     if (language !== undefined) {
-      if (
-        typeof language !== "string" ||
-        !language.trim()
-      ) {
+      if (typeof language !== "string" || !language.trim()) {
         return res.status(400).json({
           message: "Invalid language",
         });
       }
-
       document.language = language.trim();
     }
 
-    /*
-    ========================================
-    NAME
-    ========================================
-    */
-
     if (name !== undefined) {
-      if (
-        typeof name !== "string" ||
-        !name.trim()
-      ) {
+      if (typeof name !== "string" || !name.trim()) {
         return res.status(400).json({
           message: "Invalid document name",
         });
       }
 
       const trimmedName = name.trim();
-
       if (trimmedName.length > 100) {
         return res.status(400).json({
-          message:
-            "Document name cannot exceed 100 characters",
+          message: "Document name cannot exceed 100 characters",
         });
       }
 
-      // Check if another document already uses this name
       const duplicate = await Document.findOne({
         room: room._id,
         name: trimmedName,
-        _id: {
-          $ne: document._id,
-        },
+        _id: { $ne: document._id },
       });
 
       if (duplicate) {
         return res.status(409).json({
-          message:
-            "A document with this name already exists",
+          message: "A document with this name already exists",
         });
       }
 
@@ -313,10 +267,15 @@ const updateDocument = async (req, res) => {
     }
 
     document.updatedBy = req.user.id;
-
     document.version += 1;
-
     await document.save();
+
+    // Sync disk file
+    try {
+      await fileService.writeFile(document.room, document.name, document.content || "");
+    } catch (fsErr) {
+      console.error("Failed to sync updated doc to disk:", fsErr.message);
+    }
 
     await document.populate([
       {
@@ -335,7 +294,6 @@ const updateDocument = async (req, res) => {
     });
   } catch (error) {
     console.error("UPDATE DOCUMENT ERROR:", error);
-
     res.status(500).json({
       message: "Failed to update document",
       error: error.message,
@@ -349,11 +307,9 @@ DELETE DOCUMENT
 DELETE /api/documents/:documentId
 ========================================
 */
-
 const deleteDocument = async (req, res) => {
   try {
     const { documentId } = req.params;
-
     const document = await Document.findById(documentId);
 
     if (!document) {
@@ -363,7 +319,6 @@ const deleteDocument = async (req, res) => {
     }
 
     const room = await Room.findById(document.room);
-
     if (!room) {
       return res.status(404).json({
         message: "Room not found",
@@ -372,9 +327,15 @@ const deleteDocument = async (req, res) => {
 
     if (!isOwnerOrAdmin(room, req.user.id)) {
       return res.status(403).json({
-        message:
-          "Only the owner or admin can delete documents",
+        message: "Only the owner or admin can delete documents",
       });
+    }
+
+    // Remove from disk
+    try {
+      await fileService.remove(document.room, document.name);
+    } catch (fsErr) {
+      console.error("Failed to delete doc from disk:", fsErr.message);
     }
 
     await Document.findByIdAndDelete(documentId);
@@ -384,7 +345,6 @@ const deleteDocument = async (req, res) => {
     });
   } catch (error) {
     console.error("DELETE DOCUMENT ERROR:", error);
-
     res.status(500).json({
       message: "Failed to delete document",
       error: error.message,
